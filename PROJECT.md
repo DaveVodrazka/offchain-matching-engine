@@ -105,7 +105,7 @@ Principles:
   - [x] `rust-toolchain.toml`, `rustfmt.toml`, `clippy.toml`
   - [x] `git init` at the root
   - [x] Remove the nested `crates/domain/.git`
-  - [ ] First commit
+  - [x] First commit
   - [ ] CI (fmt, clippy, test)
 - [ ] **3. Order book data structure.** Price levels, a FIFO queue per level, O(1) cancel
 - [ ] **4. Matching algorithm.** `apply(Command) -> Vec<Event>`, limit and market orders
