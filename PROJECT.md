@@ -75,6 +75,17 @@ Principles:
 | 2026-10-14 | `QuoteAmount`/`BaseAmount` have `pub(crate)` constructors | Only `MarketSpec` mints amounts. Other crates can read them but not create them (revisit in Lesson 8 for deposits) |
 | 2026-10-14 | `domain` exposes a flat API through `lib.rs` re-exports, with private modules | The file layout stays an internal detail, and `unreachable_pub` polices the API surface |
 | 2026-10-14 | `MarketSpec::new` will take `base: Asset, quote: Asset` (Lesson 9). No `MarketParams` or decimals newtypes now | Swapped decimals silently give a wrong K (10^12×). `Asset` carries its own decimals. Tick and lot can still be swapped (K is symmetric, `base_amount` is wrong), so test the getters |
+| 2026-10-14 | CI runs on push to every branch (tags ignored), with no `pull_request` trigger | Solo repo with no forks: branches get tested without opening a PR, and there are no duplicate runs. Add `pull_request` back if outside contributors join |
+| 2026-10-14 | `rust-toolchain.toml` is the only place the toolchain version is set; CI reads it via `setup-rust-toolchain` | A version pinned in several places drifts apart |
+| 2026-10-14 | CI uses `--locked`, `--all-targets` and `-D warnings` | The lockfile must not change without anyone noticing, lints apply to tests too, and a warning fails the build |
+| 2026-10-14 | Cancel in O(1) using a slab with an intrusive doubly linked list per level | 90% or more of venue traffic is cancels. Unlinking a node is O(1) with no tombstones, so walking a level never has to skip dead orders. This is the core learning goal of the project |
+| 2026-10-14 | Price levels are kept in a `BTreeMap<Price, Level>` per side; the `OrderId` index is a `HashMap` used for lookups only | Deterministic ordered iteration with O(log L), where the number of levels L is small. The index is never iterated, so `HashMap`'s random order can't break replay |
+| 2026-10-14 | The book lives in `crates/engine` as a `book` module | Matching (Lesson 4) goes in the same crate, so the book's internals can stay `pub(crate)` |
+| 2026-10-14 | `rest()` checks that the order doesn't cross the spread with `debug_assert!` only | Crossing is the engine's job. Tests catch engine bugs, release builds pay nothing, and the Lesson 5 property tests are the real guarantee |
+| 2026-10-14 | Write our own generic `Slab<T>` with generational keys `SlotKey { index: u32, generation: u32 }`. Generations use `wrapping_add`. `get`/`get_mut`/`remove` return `Result<_, SlabError>` | It's for learning, and `slotmap` serves as the reference. Generations turn a stale key from silent cross-user corruption into an error. `u32` keeps the key at 8 bytes and doesn't depend on the platform. A false match after wrapping needs a stale key that survives 2³² reuses of one slot. The slab knows nothing about orders |
+| 2026-10-18 | Slab lookups return `Result` with a single `SlabError::StaleSlotKey`, not `Option` | Inside the engine every key comes from the `OrderId` index or level links, so a stale key always means a bug (an unknown `OrderId` fails earlier, at the `HashMap`). The error documents the failure. Genuine stale keys only ever fail the generation check, so one variant is enough |
+| 2026-10-18 | `insert` is infallible: broken internal invariants use `unreachable!`, and index-space exhaustion (`len == u32::MAX`) panics | The caller can't cause or fix slab self-corruption, so it shouldn't have to handle it. Exhaustion is a capacity limit, and fail-stop matches `overflow-checks = true`. A `debug_assert!` on the push path (empty free list ⇒ `len == vec.len()`) is the proof that `to_u32` never truncates |
+| 2026-10-18 | The slab tracks `len` as a counter, and `len`/`is_empty`/`contains` exist even though the book can use `index.len()` | It's a generic container, and tests and invariant checks need it. O(1) |
 | — | Chain choice (EVM vs Starknet): **deferred to Lesson 9** | Not needed until signed orders |
 
 ## Lessons
@@ -98,7 +109,7 @@ Principles:
   - [x] Visibility pass: field privacy, `pub(crate)` constructors, `lib.rs` re-exports
   - [x] `OrderIdGenerator`: `fresh()` and `resume_after()` for replay
   - [x] Polish: `const fn` constructors, error message casing, comments, a scoped `#[allow]`
-- [ ] **2. Workspace and tooling.** Cargo workspace, lints, toolchain pin, git
+- [x] **2. Workspace and tooling.** Cargo workspace, lints, toolchain pin, git
   - [x] Workspace `Cargo.toml` with shared package settings and dependencies
   - [x] Workspace lints (`pedantic`, `arithmetic_side_effects`, no `unwrap`/`panic`, `forbid(unsafe)`)
   - [x] Release `overflow-checks = true`
@@ -106,8 +117,13 @@ Principles:
   - [x] `git init` at the root
   - [x] Remove the nested `crates/domain/.git`
   - [x] First commit
-  - [ ] CI (fmt, clippy, test)
+  - [x] CI (fmt, clippy, test, doc): `.github/workflows/test.yaml`
 - [ ] **3. Order book data structure.** Price levels, a FIFO queue per level, O(1) cancel
+  - [x] Concept, role, top-level decisions (A–D)
+  - [x] 3a. Slab: stable-index storage, free list, stale keys (25 tests, including a model-based churn test)
+  - [ ] 3b. Level: intrusive doubly linked FIFO list over the slab, cached total
+  - [ ] 3c. Side: `BTreeMap<Price, Level>`, best price, bid/ask ordering
+  - [ ] 3d. `OrderBook`: `OrderId` index, `rest`/`cancel`/`peek_best`/`fill_front` API, tests
 - [ ] **4. Matching algorithm.** `apply(Command) -> Vec<Event>`, limit and market orders
 - [ ] **5. Invariants and property testing.** proptest suite for the book (no crossed book, quantity conservation)
 - [ ] **6. Advanced order types.** IOC, FOK, post-only, self-trade prevention
@@ -125,11 +141,12 @@ Principles:
 
 ## Current status
 
-**Lesson 1 is complete** (2026-10-14): 42 tests pass, and clippy, fmt and doc are clean.
+**Lessons 1 and 2 are complete** (2026-10-14): 42 tests pass, and CI (fmt, clippy, test, doc) is green on `master`.
+
+**Lesson 3a (slab) is complete** (2026-10-18).
 
 **Next session:**
-1. Finish Lesson 2: the first commit (nothing is committed yet) and CI (fmt, clippy, test).
-2. Start **Lesson 3: the order book data structure.**
+1. **Lesson 3b: Level.** An intrusive doubly linked FIFO list over the slab, with a cached total. Open question from 3a: does unlinking need `get2_mut`, or is sequential `get_mut` enough? Remove the `#[cfg_attr(not(test), expect(dead_code))]` on `book::slab` once Level uses it.
 
 **Small leftovers (optional):**
 - Public items have `# Errors`/`# Panics` sections but no one-line doc summaries.
