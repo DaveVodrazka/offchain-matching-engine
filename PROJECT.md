@@ -24,6 +24,12 @@ Each lesson follows the same loop:
 5. **Review.** Review rounds until the code is correct and idiomatic.
 6. **Filler.** The assistant adds non-educational code, with the author's OK.
 
+Roles:
+
+- **The assistant owns this file.** PROJECT.md is the syllabus, and the author is the student. The assistant keeps it current without being asked: lesson progress, decisions as they are made, current status and next steps.
+- **Lessons never leak into the code.** Comments, test names and lint reasons describe the system, never the course. No lesson numbers, no "we'll build this later". The code always reads as production code in progress.
+- **Git belongs to the author.** The assistant never commits, branches or pushes.
+
 ## Architecture (target)
 
 ```
@@ -86,6 +92,14 @@ Principles:
 | 2026-10-18 | Slab lookups return `Result` with a single `SlabError::StaleSlotKey`, not `Option` | Inside the engine every key comes from the `OrderId` index or level links, so a stale key always means a bug (an unknown `OrderId` fails earlier, at the `HashMap`). The error documents the failure. Genuine stale keys only ever fail the generation check, so one variant is enough |
 | 2026-10-18 | `insert` is infallible: broken internal invariants use `unreachable!`, and index-space exhaustion (`len == u32::MAX`) panics | The caller can't cause or fix slab self-corruption, so it shouldn't have to handle it. Exhaustion is a capacity limit, and fail-stop matches `overflow-checks = true`. A `debug_assert!` on the push path (empty free list ⇒ `len == vec.len()`) is the proof that `to_u32` never truncates |
 | 2026-10-18 | The slab tracks `len` as a counter, and `len`/`is_empty`/`contains` exist even though the book can use `index.len()` | It's a generic container, and tests and invariant checks need it. O(1) |
+| 2026-10-19 | The `OrderId` index stores `(Side, Price, SlotKey)`; a `Node` holds only `id`, `qty`, `prev`, `next` | Cancel arrives with only an `OrderId`, and the level can't be found without side and price. Keeping them in the index keeps nodes small on the matching hot path, and `Level` stays a pure queue that knows nothing about prices |
+| 2026-10-19 | One slab for the whole book; `Level` methods take `&mut Slab<Node>` per call instead of storing a reference | Many levels can't each hold `&mut` to one slab, and the book owning both the slab and levels that borrow it would be self-referential. Passing the slab per call is the standard arena pattern, and signatures show who mutates |
+| 2026-10-19 | `Node` lives in the `level` module with private links; callers pass `(id, qty)` to `push_back` and never build a `Node` | Only `Level` maintains `prev`/`next`, so nothing outside can corrupt the list |
+| 2026-10-19 | `Level::total_qty` is `u128`, and `push_back` is infallible | Orders per level ≤ slab cap 2³², each qty < 2⁶⁴, so the sum < 2⁹⁶. Overflow is impossible, so the checked add uses `unreachable!` |
+| 2026-10-19 | A stale key or broken link inside `Level` panics (`unreachable!`) | No user input can produce a `SlotKey`, so it can only be a bug. The market halts, and recovery replays the command log, which reproduces the bug deterministically, so the fix is a code fix, not a restart |
+| 2026-10-19 | `fill_front(slab, wanted)` fills only the head order, clamped to `min(wanted, head.qty)`, and returns a `#[must_use]` `FrontFill { maker, filled, remaining }` | Walking across orders and handling leftover quantity is the matching loop's job. `remaining: None` tells the book to drop the maker from the index; ignoring it would leak index entries. `Qty` is non-zero, so every call makes progress |
+| 2026-10-19 | A full fill reuses `unlink(head)` | A hand-rolled copy left `tail` and the new head's `prev` pointing at the freed node. One unlink path, one place to get right |
+| 2026-10-19 | `unlink` debug-asserts `head`/`tail == Some(key)` in the head, tail and only-node cases | An O(1) check that catches a key from the wrong level where it does the most damage. A wrong-level middle node only skews counters, which the invariant tests catch |
 | — | Chain choice (EVM vs Starknet): **deferred to Lesson 9** | Not needed until signed orders |
 
 ## Lessons
@@ -121,7 +135,7 @@ Principles:
 - [ ] **3. Order book data structure.** Price levels, a FIFO queue per level, O(1) cancel
   - [x] Concept, role, top-level decisions (A–D)
   - [x] 3a. Slab: stable-index storage, free list, stale keys (25 tests, including a model-based churn test)
-  - [ ] 3b. Level: intrusive doubly linked FIFO list over the slab, cached total
+  - [x] 3b. Level: intrusive doubly linked FIFO list over the slab, cached `u128` total, `push_back`/`unlink`/`fill_front` (23 tests, including a `VecDeque` model churn test)
   - [ ] 3c. Side: `BTreeMap<Price, Level>`, best price, bid/ask ordering
   - [ ] 3d. `OrderBook`: `OrderId` index, `rest`/`cancel`/`peek_best`/`fill_front` API, tests
 - [ ] **4. Matching algorithm.** `apply(Command) -> Vec<Event>`, limit and market orders
@@ -145,8 +159,11 @@ Principles:
 
 **Lesson 3a (slab) is complete** (2026-10-18).
 
+**Lesson 3b (level) is complete** (2026-10-19): 90 tests pass across the workspace. Lessons learned: one unlink path (the hand-rolled full fill corrupted `tail` and `prev`), elided lifetimes tie a method's output to `&self` (`peek_head` needs `'a` on the slab), and `Option::map` vs `and_then`.
+
 **Next session:**
-1. **Lesson 3b: Level.** An intrusive doubly linked FIFO list over the slab, with a cached total. Open question from 3a: does unlinking need `get2_mut`, or is sequential `get_mut` enough? Remove the `#[cfg_attr(not(test), expect(dead_code))]` on `book::slab` once Level uses it.
+1. **Lesson 3c: Side.** A `BTreeMap<Price, Level>` per side: best price, bid/ask ordering (bids iterate highest first), get-or-create a level on rest, remove a level the moment it empties (so `fill_front` never sees an empty level). Concept first.
+2. Once `Side` uses `Level`, remove the `#[cfg_attr(not(test), expect(dead_code))]` on `book::level` and `book::slab`, and give the remaining one a reason that describes the code, not "currently not used".
 
 **Small leftovers (optional):**
 - Public items have `# Errors`/`# Panics` sections but no one-line doc summaries.

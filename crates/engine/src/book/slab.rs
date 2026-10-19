@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn random_churn_matches_a_reference_model() {
-        // Deterministic xorshift so failures reproduce. Real property tests come in Lesson 5.
+        // Deterministic xorshift so failures reproduce.
         let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = move || {
             seed ^= seed << 13;

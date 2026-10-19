@@ -91,6 +91,15 @@ impl Level {
     pub(crate) fn total_qty(&self) -> u128 {
         self.total_qty
     }
+    /// Removes the order at `key` from anywhere in the queue in O(1) and returns it.
+    ///
+    /// `key` must belong to this level. A key from another level corrupts both levels;
+    /// debug builds catch it only when the node is a head or tail.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `key` is stale or the level's links point at a freed node. Both mean
+    /// the book's state is already corrupted.
     pub(crate) fn unlink(&mut self, slab: &mut Slab<Node>, key: SlotKey) -> Node {
         let Ok(node_to_be_unlinked) = slab.remove(key) else {
             unreachable!("slab holds nodes for every existing key");
