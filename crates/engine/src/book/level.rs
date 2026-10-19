@@ -186,3 +186,98 @@ impl Level {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn qty(lots: u64) -> Qty {
+        Qty::try_new(lots).expect("test qty must be non-zero")
+    }
+
+    fn assert_invariants(slab: &Slab<Node>, level: &Level) {
+        let mut walked = 0_u32;
+        let mut walked_qty = 0_u128;
+        let mut key_option = level.head;
+        let mut prev_key = None;
+
+        while let Some(key) = key_option {
+            assert!(walked <= level.count, "cycle in next links");
+            let node = slab.get(key).expect("level links must point to live nodes");
+            assert_eq!(node.prev, prev_key, "broken back link");
+            walked = walked.checked_add(1).expect("walked count overflow");
+            walked_qty = walked_qty
+                .checked_add(u128::from(node.qty.get()))
+                .expect("walked_qty overflow");
+            prev_key = key_option;
+            key_option = node.next;
+        }
+        assert_eq!(level.tail, prev_key, "broken tail back link");
+        assert_eq!(walked, level.count, "walked does not match count");
+        assert_eq!(
+            walked_qty, level.total_qty,
+            "walked_qty does not match total_qty"
+        );
+    }
+
+    #[test]
+    fn new_level_is_empty() {
+        let level = Level::new();
+        let slab = Slab::<Node>::new();
+        assert!(level.is_empty());
+        assert_eq!(level.len(), 0);
+        assert_invariants(&slab, &level);
+    }
+
+    #[test]
+    fn insert() {
+        let mut level = Level::new();
+        let mut slab = Slab::<Node>::new();
+        let id = OrderId::new(123);
+        let qty = Qty::try_new(456).expect("failed creating Qty");
+        level.push_back(&mut slab, id, qty);
+        assert_invariants(&slab, &level);
+        assert_eq!(level.len(), 1, "count does not match");
+        assert_eq!(
+            level.total_qty(),
+            u128::from(qty.get()),
+            "total_qty does not match"
+        );
+    }
+
+    #[test]
+    fn fifo_ordering() {
+        let mut level = Level::new();
+        let mut slab = Slab::<Node>::new();
+        let id1 = OrderId::new(1);
+        let id2 = OrderId::new(2);
+        let id3 = OrderId::new(3);
+        level.push_back(&mut slab, id1, qty(5));
+        assert_invariants(&slab, &level);
+        level.push_back(&mut slab, id2, qty(5));
+        assert_invariants(&slab, &level);
+        level.push_back(&mut slab, id3, qty(5));
+        assert_invariants(&slab, &level);
+        assert_eq!(level.len(), 3, "count does not match");
+        assert_eq!(
+            level.total_qty(),
+            qty(15).get().into(),
+            "total_qty does not match"
+        );
+        let res1 = level.fill_front(&mut slab, qty(5));
+        assert_eq!(res1.maker, id1);
+        assert_eq!(res1.filled, qty(5));
+        assert_eq!(res1.remaining, None);
+        assert_invariants(&slab, &level);
+        let res2 = level.fill_front(&mut slab, qty(5));
+        assert_eq!(res2.maker, id2);
+        assert_eq!(res2.filled, qty(5));
+        assert_eq!(res2.remaining, None);
+        assert_invariants(&slab, &level);
+        let res3 = level.fill_front(&mut slab, qty(5));
+        assert_eq!(res3.maker, id3);
+        assert_eq!(res3.filled, qty(5));
+        assert_eq!(res3.remaining, None);
+        assert_invariants(&slab, &level);
+    }
+}
