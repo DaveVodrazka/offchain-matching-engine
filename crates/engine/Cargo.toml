@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+domain = { path = "../domain" }
 
 [lints]
 workspace = true
