@@ -18,6 +18,7 @@ pub(crate) struct Level {
     count: u32,
 }
 
+#[must_use]
 #[derive(Debug)]
 pub(crate) struct FrontFill {
     pub(crate) maker: OrderId,
@@ -173,7 +174,6 @@ impl Level {
         self.unlink(slab, head_key);
     }
 
-    #[must_use]
     pub(crate) fn fill_front(&mut self, slab: &mut Slab<Node>, qty: Qty) -> FrontFill {
         let Some(head_node) = self.peek_head(slab) else {
             unreachable!("cannot call fill_front on empty level");
