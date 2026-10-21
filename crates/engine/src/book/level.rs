@@ -18,12 +18,22 @@ pub(crate) struct Level {
     count: u32,
 }
 
-#[must_use]
+#[must_use = "a maker with `remaining: None` must be removed from the order index"]
 #[derive(Debug)]
 pub(crate) struct FrontFill {
     pub(crate) maker: OrderId,
     pub(crate) filled: Qty,
     pub(crate) remaining: Option<Qty>,
+}
+
+impl Node {
+    pub(crate) fn id(&self) -> OrderId {
+        self.id
+    }
+
+    pub(crate) fn qty(&self) -> Qty {
+        self.qty
+    }
 }
 
 impl Default for Level {
