@@ -26,6 +26,7 @@ pub(crate) struct BestFill {
 ///
 /// Invariant: the map never holds an empty level. Every mutating method removes a level
 /// the moment it empties.
+#[derive(Debug)]
 pub(crate) struct BookSide {
     side: Side,
     levels: BTreeMap<Price, Level>,
