@@ -118,6 +118,26 @@ impl BookSide {
             remaining,
         })
     }
+
+    /// Number of resting orders on this side, across all levels. O(L) in the number of levels.
+    #[must_use]
+    pub(crate) fn len(&self) -> u32 {
+        let mut sum: u32 = 0;
+        for level in self.levels.values() {
+            let Some(new_sum) = sum.checked_add(level.len()) else {
+                unreachable!("slab cannot hold more than u32 items");
+            };
+            sum = new_sum;
+        }
+        sum
+    }
+
+    /// Whether the side has no resting orders. O(1): the map never holds an empty level, so
+    /// no levels means no orders.
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.levels.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +223,12 @@ mod tests {
             resting_orders,
             "slab holds nodes that no level links to, or levels count freed nodes"
         );
+        assert_eq!(side.len(), resting_orders, "len disagrees with the levels");
+        assert_eq!(
+            side.is_empty(),
+            resting_orders == 0,
+            "is_empty disagrees with the levels"
+        );
 
         let expected_best = match side.side {
             Side::Ask => side.levels.keys().next().copied(),
@@ -228,9 +254,43 @@ mod tests {
             let mut slab = Slab::new();
             let mut side = BookSide::new(direction);
             assert_eq!(side.best_price(), None);
+            assert_eq!(side.len(), 0);
+            assert!(side.is_empty());
             assert!(side.fill_best(&mut slab, qty(1)).is_none());
             assert_invariants(&slab, &mut side);
         }
+    }
+
+    // --- Size ---
+
+    #[test]
+    fn len_counts_orders_not_levels() {
+        let (_, side, _) = side_with(Side::Bid, &[(100, 1, 5), (100, 2, 5), (99, 3, 5)]);
+        assert_eq!(side.len(), 3);
+        assert!(!side.is_empty());
+    }
+
+    #[test]
+    fn len_tracks_rest_fill_and_cancel() {
+        let (mut slab, mut side, keys) =
+            side_with(Side::Ask, &[(100, 1, 10), (100, 2, 5), (101, 3, 5)]);
+
+        let _ = fill(&mut slab, &mut side, 4);
+        assert_eq!(side.len(), 3, "a partial fill keeps the maker");
+
+        let _ = fill(&mut slab, &mut side, 6);
+        assert_eq!(side.len(), 2, "a full fill removes the maker");
+
+        let _ = side.cancel(&mut slab, price(101), keys[2]);
+        assert_eq!(side.len(), 1);
+
+        side.rest(&mut slab, price(102), id(4), qty(1));
+        assert_eq!(side.len(), 2);
+
+        let _ = side.cancel(&mut slab, price(100), keys[1]);
+        let _ = fill(&mut slab, &mut side, 1);
+        assert_eq!(side.len(), 0);
+        assert!(side.is_empty());
     }
 
     // --- Price priority ---
@@ -355,6 +415,7 @@ mod tests {
             let _ = fill(&mut slab, &mut side, 4);
         }
         assert!(side.fill_best(&mut slab, qty(1)).is_none());
+        assert!(side.is_empty());
         assert!(slab.is_empty());
     }
 
@@ -522,6 +583,13 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(levels(&side), expected, "levels diverged at step {step}");
+                let model_len: usize = model.values().map(VecDeque::len).sum();
+                let expected_size = (u32::try_from(model_len).unwrap(), model.is_empty());
+                assert_eq!(
+                    (side.len(), side.is_empty()),
+                    expected_size,
+                    "size diverged at step {step}"
+                );
             }
         }
     }
