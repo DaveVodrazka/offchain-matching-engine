@@ -133,85 +133,450 @@ mod tests {
     }
 
     fn qty(n: u64) -> Qty {
-        Qty::try_new(n).unwrap()
+        Qty::try_new(n).expect("test qty must be non-zero")
     }
 
     fn price(n: u64) -> Price {
-        Price::try_new(n).unwrap()
+        Price::try_new(n).expect("test price must be non-zero")
+    }
+
+    fn limit(id: OrderId, side: Side, price: Price, qty: Qty) -> Command {
+        Command::Limit {
+            id,
+            qty,
+            side,
+            price,
+        }
+    }
+    fn rested(id: OrderId, side: Side, price: Price, qty: Qty) -> Event {
+        Event::Rested {
+            id,
+            qty,
+            side,
+            price,
+        }
+    }
+    fn fill(
+        fill_id: FillId,
+        maker: OrderId,
+        taker: OrderId,
+        taker_side: Side,
+        price: Price,
+        filled: Qty,
+    ) -> Event {
+        Event::Fill {
+            maker,
+            taker,
+            taker_side,
+            filled,
+            price,
+            fill_id,
+        }
+    }
+
+    fn cancel(id: OrderId) -> Command {
+        Command::Cancel { id }
+    }
+
+    fn cancelled(id: OrderId, side: Side, price: Price, qty: Qty) -> Event {
+        Event::Cancelled {
+            id,
+            qty,
+            price,
+            side,
+        }
+    }
+
+    fn unknown_order(id: OrderId) -> Event {
+        Event::Rejected {
+            id,
+            reason: RejectionReason::UnknownOrder,
+        }
+    }
+
+    /// Builds an engine from orders that must each rest without matching.
+    fn engine_with(orders: &[Command]) -> Engine {
+        let mut engine = Engine::new();
+        for &order in orders {
+            let events = engine.apply(order);
+            assert!(
+                matches!(events.as_slice(), [Event::Rested { .. }]),
+                "setup order {order:?} must rest, got {events:?}"
+            );
+        }
+        engine
+    }
+
+    // --- Resting ---
+
+    #[test]
+    fn ask_on_empty_book_rests_and_cancels_in_full() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.apply(limit(order_id(1), Side::Ask, price(100), qty(10))),
+            vec![rested(order_id(1), Side::Ask, price(100), qty(10))]
+        );
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![cancelled(order_id(1), Side::Ask, price(100), qty(10))]
+        );
     }
 
     #[test]
-    fn test_create_cancel() {
+    fn bid_on_empty_book_rests_in_full() {
         let mut engine = Engine::new();
-        let limit_events = engine.apply(Command::Limit {
-            id: order_id(1),
-            qty: qty(10),
-            side: Side::Ask,
-            price: price(100),
-        });
         assert_eq!(
-            limit_events,
-            vec![Event::Rested {
-                id: order_id(1),
-                qty: qty(10),
-                side: Side::Ask,
-                price: price(100),
-            }]
-        );
-        let cancel_events = engine.apply(Command::Cancel { id: order_id(1) });
-        assert_eq!(
-            cancel_events,
-            vec![Event::Cancelled {
-                id: order_id(1),
-                qty: qty(10),
-                side: Side::Ask,
-                price: price(100),
-            }]
+            engine.apply(limit(order_id(1), Side::Bid, price(100), qty(10))),
+            vec![rested(order_id(1), Side::Bid, price(100), qty(10))]
         );
     }
 
     #[test]
-    fn test_limit_match() {
-        let mut engine = Engine::new();
-        let ask_events = engine.apply(Command::Limit {
-            id: order_id(1),
-            qty: qty(10),
-            side: Side::Ask,
-            price: price(100),
-        });
+    fn bid_one_tick_below_best_ask_rests_without_filling() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(101), qty(5))]);
         assert_eq!(
-            ask_events,
-            vec![Event::Rested {
-                id: order_id(1),
-                qty: qty(10),
-                side: Side::Ask,
-                price: price(100),
-            }]
+            engine.apply(limit(order_id(2), Side::Bid, price(100), qty(7))),
+            vec![rested(order_id(2), Side::Bid, price(100), qty(7))]
         );
-        let bid_events = engine.apply(Command::Limit {
-            id: order_id(2),
-            qty: qty(15),
-            side: Side::Bid,
-            price: price(102),
-        });
+    }
+
+    #[test]
+    fn ask_one_tick_above_best_bid_rests_without_filling() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Bid, price(100), qty(5))]);
         assert_eq!(
-            bid_events,
+            engine.apply(limit(order_id(2), Side::Ask, price(101), qty(7))),
+            vec![rested(order_id(2), Side::Ask, price(101), qty(7))]
+        );
+    }
+
+    // --- Matching ---
+
+    #[test]
+    fn crossing_bid_fills_at_maker_price_and_rests_remainder_at_limit() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(10))]);
+        assert_eq!(
+            engine.apply(limit(order_id(2), Side::Bid, price(102), qty(15))),
             vec![
-                Event::Fill {
-                    maker: order_id(1),
-                    taker: order_id(2),
-                    taker_side: Side::Bid,
-                    filled: qty(10),
-                    price: price(100),
-                    fill_id: FillId::new(1)
-                },
-                Event::Rested {
-                    id: order_id(2),
-                    qty: qty(5),
-                    side: Side::Bid,
-                    price: price(102),
-                }
+                fill(
+                    FillId::new(1),
+                    order_id(1),
+                    order_id(2),
+                    Side::Bid,
+                    price(100),
+                    qty(10)
+                ),
+                rested(order_id(2), Side::Bid, price(102), qty(5)),
             ]
         );
+    }
+
+    #[test]
+    fn crossing_ask_fills_at_maker_price_and_rests_remainder_at_limit() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Bid, price(100), qty(10))]);
+        assert_eq!(
+            engine.apply(limit(order_id(2), Side::Ask, price(98), qty(15))),
+            vec![
+                fill(
+                    FillId::new(1),
+                    order_id(1),
+                    order_id(2),
+                    Side::Ask,
+                    price(100),
+                    qty(10)
+                ),
+                rested(order_id(2), Side::Ask, price(98), qty(5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn ask_at_best_bid_fills_exactly_and_does_not_rest() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Bid, price(100), qty(6))]);
+        assert_eq!(
+            engine.apply(limit(order_id(2), Side::Ask, price(100), qty(6))),
+            vec![fill(
+                FillId::new(1),
+                order_id(1),
+                order_id(2),
+                Side::Ask,
+                price(100),
+                qty(6)
+            )]
+        );
+        // Neither order is left on the book.
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![unknown_order(order_id(1))]
+        );
+        assert_eq!(
+            engine.apply(cancel(order_id(2))),
+            vec![unknown_order(order_id(2))]
+        );
+    }
+
+    #[test]
+    fn bid_sweeps_asks_lowest_first_and_stops_at_its_limit() {
+        let mut engine = engine_with(&[
+            limit(order_id(1), Side::Ask, price(101), qty(4)),
+            limit(order_id(2), Side::Ask, price(100), qty(3)),
+            limit(order_id(3), Side::Ask, price(102), qty(5)),
+        ]);
+        assert_eq!(
+            engine.apply(limit(order_id(4), Side::Bid, price(101), qty(10))),
+            vec![
+                fill(
+                    FillId::new(1),
+                    order_id(2),
+                    order_id(4),
+                    Side::Bid,
+                    price(100),
+                    qty(3)
+                ),
+                fill(
+                    FillId::new(2),
+                    order_id(1),
+                    order_id(4),
+                    Side::Bid,
+                    price(101),
+                    qty(4)
+                ),
+                rested(order_id(4), Side::Bid, price(101), qty(3)),
+            ]
+        );
+        // The ask beyond the limit is untouched.
+        assert_eq!(
+            engine.apply(cancel(order_id(3))),
+            vec![cancelled(order_id(3), Side::Ask, price(102), qty(5))]
+        );
+    }
+
+    #[test]
+    fn ask_sweeps_bids_highest_first() {
+        let mut engine = engine_with(&[
+            limit(order_id(1), Side::Bid, price(99), qty(4)),
+            limit(order_id(2), Side::Bid, price(100), qty(3)),
+        ]);
+        assert_eq!(
+            engine.apply(limit(order_id(3), Side::Ask, price(99), qty(5))),
+            vec![
+                fill(
+                    FillId::new(1),
+                    order_id(2),
+                    order_id(3),
+                    Side::Ask,
+                    price(100),
+                    qty(3)
+                ),
+                fill(
+                    FillId::new(2),
+                    order_id(1),
+                    order_id(3),
+                    Side::Ask,
+                    price(99),
+                    qty(2)
+                ),
+            ]
+        );
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![cancelled(order_id(1), Side::Bid, price(99), qty(2))]
+        );
+    }
+
+    #[test]
+    fn makers_at_one_price_fill_oldest_first() {
+        let mut engine = engine_with(&[
+            limit(order_id(1), Side::Ask, price(100), qty(3)),
+            limit(order_id(2), Side::Ask, price(100), qty(4)),
+        ]);
+        assert_eq!(
+            engine.apply(limit(order_id(3), Side::Bid, price(100), qty(5))),
+            vec![
+                fill(
+                    FillId::new(1),
+                    order_id(1),
+                    order_id(3),
+                    Side::Bid,
+                    price(100),
+                    qty(3)
+                ),
+                fill(
+                    FillId::new(2),
+                    order_id(2),
+                    order_id(3),
+                    Side::Bid,
+                    price(100),
+                    qty(2)
+                ),
+            ]
+        );
+        assert_eq!(
+            engine.apply(cancel(order_id(2))),
+            vec![cancelled(order_id(2), Side::Ask, price(100), qty(2))]
+        );
+    }
+
+    #[test]
+    fn partially_filled_maker_keeps_its_place_in_the_queue() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(10))]);
+        assert_eq!(
+            engine.apply(limit(order_id(2), Side::Bid, price(100), qty(4))),
+            vec![fill(
+                FillId::new(1),
+                order_id(1),
+                order_id(2),
+                Side::Bid,
+                price(100),
+                qty(4)
+            )]
+        );
+        assert_eq!(
+            engine.apply(limit(order_id(3), Side::Ask, price(100), qty(5))),
+            vec![rested(order_id(3), Side::Ask, price(100), qty(5))]
+        );
+        assert_eq!(
+            engine.apply(limit(order_id(4), Side::Bid, price(100), qty(7))),
+            vec![
+                fill(
+                    FillId::new(2),
+                    order_id(1),
+                    order_id(4),
+                    Side::Bid,
+                    price(100),
+                    qty(6)
+                ),
+                fill(
+                    FillId::new(3),
+                    order_id(3),
+                    order_id(4),
+                    Side::Bid,
+                    price(100),
+                    qty(1)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn fill_ids_continue_across_commands_and_only_fills_use_them() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(2))]);
+        assert_eq!(
+            engine.apply(limit(order_id(2), Side::Bid, price(100), qty(1))),
+            vec![fill(
+                FillId::new(1),
+                order_id(1),
+                order_id(2),
+                Side::Bid,
+                price(100),
+                qty(1)
+            )]
+        );
+        let _ = engine.apply(limit(order_id(3), Side::Ask, price(105), qty(1)));
+        let _ = engine.apply(cancel(order_id(3)));
+        let _ = engine.apply(cancel(order_id(99)));
+        assert_eq!(
+            engine.apply(limit(order_id(4), Side::Bid, price(100), qty(1))),
+            vec![fill(
+                FillId::new(2),
+                order_id(1),
+                order_id(4),
+                Side::Bid,
+                price(100),
+                qty(1)
+            )]
+        );
+    }
+
+    // --- Cancel ---
+
+    #[test]
+    fn cancel_of_unknown_id_is_rejected() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.apply(cancel(order_id(7))),
+            vec![unknown_order(order_id(7))]
+        );
+    }
+
+    #[test]
+    fn second_cancel_of_same_order_is_rejected() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Bid, price(100), qty(5))]);
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![cancelled(order_id(1), Side::Bid, price(100), qty(5))]
+        );
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![unknown_order(order_id(1))]
+        );
+    }
+
+    #[test]
+    fn cancel_of_fully_filled_maker_is_rejected() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(5))]);
+        let _ = engine.apply(limit(order_id(2), Side::Bid, price(100), qty(5)));
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![unknown_order(order_id(1))]
+        );
+    }
+
+    #[test]
+    fn cancel_of_partially_filled_maker_removes_only_the_unfilled_qty() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(10))]);
+        let _ = engine.apply(limit(order_id(2), Side::Bid, price(100), qty(4)));
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![cancelled(order_id(1), Side::Ask, price(100), qty(6))]
+        );
+    }
+
+    #[test]
+    fn rested_remainder_of_a_taker_can_be_cancelled() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(4))]);
+        let _ = engine.apply(limit(order_id(2), Side::Bid, price(101), qty(10)));
+        assert_eq!(
+            engine.apply(cancel(order_id(2))),
+            vec![cancelled(order_id(2), Side::Bid, price(101), qty(6))]
+        );
+        // The bid side is empty again, so an ask at the old bid price rests.
+        assert_eq!(
+            engine.apply(limit(order_id(3), Side::Ask, price(101), qty(1))),
+            vec![rested(order_id(3), Side::Ask, price(101), qty(1))]
+        );
+    }
+
+    #[test]
+    fn cancelled_order_no_longer_matches() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(5))]);
+        let _ = engine.apply(cancel(order_id(1)));
+        assert_eq!(
+            engine.apply(limit(order_id(2), Side::Bid, price(100), qty(5))),
+            vec![rested(order_id(2), Side::Bid, price(100), qty(5))]
+        );
+    }
+
+    // --- Determinism ---
+
+    #[test]
+    fn same_commands_produce_same_events() {
+        let commands = [
+            limit(order_id(1), Side::Ask, price(101), qty(4)),
+            limit(order_id(2), Side::Ask, price(100), qty(3)),
+            limit(order_id(3), Side::Bid, price(98), qty(6)),
+            limit(order_id(4), Side::Bid, price(101), qty(5)),
+            cancel(order_id(3)),
+            limit(order_id(5), Side::Ask, price(97), qty(8)),
+            cancel(order_id(1)),
+            cancel(order_id(42)),
+        ];
+        let run = || {
+            let mut engine = Engine::new();
+            commands
+                .iter()
+                .map(|&command| engine.apply(command))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run());
     }
 }
