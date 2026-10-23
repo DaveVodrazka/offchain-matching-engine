@@ -16,6 +16,13 @@ struct IndexValue {
     slot_key: SlotKey,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CancelledOrder {
+    pub(crate) side: Side,
+    pub(crate) price: Price,
+    pub(crate) qty: Qty,
+}
+
 /// The resting orders of one market: both sides, the node storage they share, and an index
 /// from `OrderId` to each order's location.
 ///
@@ -56,15 +63,20 @@ impl OrderBook {
     ///
     /// Returns `None` if `id` isn't resting: it never existed, was already cancelled, or was
     /// fully filled. A cancel racing a fill is normal market traffic, not an error.
-    pub(crate) fn cancel(&mut self, id: OrderId) -> Option<Node> {
+    pub(crate) fn cancel(&mut self, id: OrderId) -> Option<CancelledOrder> {
         let IndexValue {
             side,
             price,
             slot_key,
         } = self.index.remove(&id)?;
-        Some(match side {
+        let node = match side {
             Side::Ask => self.asks.cancel(&mut self.slab, price, slot_key),
             Side::Bid => self.bids.cancel(&mut self.slab, price, slot_key),
+        };
+        Some(CancelledOrder {
+            side,
+            price,
+            qty: node.qty(),
         })
     }
 
@@ -160,6 +172,14 @@ mod tests {
         let fill = ob.fill_best(side, qty(wanted)).expect("side has liquidity");
         assert_invariants(ob);
         fill
+    }
+
+    fn cancelled(side: Side, ticks: u64, lots: u64) -> CancelledOrder {
+        CancelledOrder {
+            side,
+            price: price(ticks),
+            qty: qty(lots),
+        }
     }
 
     /// `(price, maker, filled, remaining)` as raw numbers, for compact assertions.
@@ -284,14 +304,12 @@ mod tests {
             (Side::Ask, 102, 2, 7),
             (Side::Bid, 99, 3, 4),
         ]);
-        let node = ob.cancel(id(1)).expect("order is resting");
+        assert_eq!(ob.cancel(id(1)), Some(cancelled(Side::Ask, 101, 5)));
         assert_invariants(&ob);
-        assert_eq!((node.id(), node.qty()), (id(1), qty(5)));
         assert_eq!(ob.best_price(Side::Ask), Some(price(102)));
 
-        let node = ob.cancel(id(3)).expect("order is resting");
+        assert_eq!(ob.cancel(id(3)), Some(cancelled(Side::Bid, 99, 4)));
         assert_invariants(&ob);
-        assert_eq!((node.id(), node.qty()), (id(3), qty(4)));
         assert_eq!(ob.best_price(Side::Bid), None);
     }
 
@@ -315,10 +333,7 @@ mod tests {
     fn cancel_after_partial_fill_returns_remaining_qty() {
         let mut ob = book_with(&[(Side::Ask, 101, 1, 10)]);
         let _ = fill(&mut ob, Side::Ask, 4);
-        let node = ob
-            .cancel(id(1))
-            .expect("partially filled order still rests");
-        assert_eq!(node.qty(), qty(6));
+        assert_eq!(ob.cancel(id(1)), Some(cancelled(Side::Ask, 101, 6)));
     }
 
     #[test]
@@ -337,8 +352,7 @@ mod tests {
         assert_invariants(&ob);
 
         assert!(ob.cancel(id(1)).is_none());
-        let node = ob.cancel(id(2)).expect("new order rests");
-        assert_eq!((node.id(), node.qty()), (id(2), qty(3)));
+        assert_eq!(ob.cancel(id(2)), Some(cancelled(Side::Ask, 101, 3)));
         assert_invariants(&ob);
     }
 
@@ -402,8 +416,8 @@ mod tests {
             self.live.insert(raw_id, (side, ticks));
         }
 
-        /// Returns the cancelled order's remaining lots.
-        fn cancel(&mut self, raw_id: u64) -> Option<u64> {
+        /// Returns the cancelled order's `(side, price, remaining lots)`.
+        fn cancel(&mut self, raw_id: u64) -> Option<(Side, u64, u64)> {
             let (side, ticks) = self.live.remove(&raw_id)?;
             let levels = self.levels(side);
             let queue = levels.get_mut(&ticks).expect("live order has a level");
@@ -415,7 +429,7 @@ mod tests {
             if queue.is_empty() {
                 levels.remove(&ticks);
             }
-            Some(lots)
+            Some((side, ticks, lots))
         }
 
         /// Returns `(price, maker, filled, remaining)`, like `summary`.
@@ -481,11 +495,10 @@ mod tests {
                 2 if !model.live.is_empty() => {
                     let index = pick(next(), model.live.len());
                     let raw_id = *model.live.keys().nth(index).expect("index is in range");
-                    let node = ob.cancel(id(raw_id)).expect("live order cancels");
-                    let lots = model.cancel(raw_id).expect("live order cancels");
+                    let (side, ticks, lots) = model.cancel(raw_id).expect("live order cancels");
                     assert_eq!(
-                        (node.id(), node.qty()),
-                        (id(raw_id), qty(lots)),
+                        ob.cancel(id(raw_id)),
+                        Some(cancelled(side, ticks, lots)),
                         "wrong cancel at step {step}"
                     );
                     dead.push(raw_id);
