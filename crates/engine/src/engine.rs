@@ -9,6 +9,11 @@ use crate::{
     event::{Event, RejectionReason},
 };
 
+/// The matching engine for one market.
+///
+/// [`apply`](Self::apply) is a pure function of the engine's state and the command: no
+/// clock, no randomness, no IO. Replaying the same commands on a fresh engine produces the
+/// same events, so the state equals the replay of the command log.
 pub struct Engine {
     order_book: OrderBook,
     fill_id_generator: FillIdGenerator,
@@ -31,6 +36,7 @@ impl Default for Engine {
 }
 
 impl Engine {
+    /// An engine with an empty book whose first fill id is 1.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -128,7 +134,16 @@ impl Engine {
         events
     }
 
-    #[must_use]
+    /// Applies one command and returns its events, in order: the fills, best price first
+    /// and oldest maker first within a price, then the taker's `Rested` or `Expired`
+    /// remainder, if any. Every command produces at least one event.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a `Limit` order would rest under an id that is already resting. The
+    /// sequencer issues unique ids, so a duplicate is a bug upstream. Also panics after
+    /// `u64::MAX` fills, when fill ids run out.
+    #[must_use = "the events are the only record of what the command did"]
     pub fn apply(&mut self, cmd: Command) -> Vec<Event> {
         match cmd {
             Command::Cancel { id } => self.cancel(id),

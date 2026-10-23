@@ -16,6 +16,7 @@ struct IndexValue {
     slot_key: SlotKey,
 }
 
+/// A cancelled order's location and its unfilled quantity at the moment it left the book.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct CancelledOrder {
     pub(crate) side: Side,
@@ -58,7 +59,7 @@ impl OrderBook {
         }
     }
 
-    /// Removes the resting order `id` from the book and returns it, with its remaining
+    /// Removes the resting order `id` from the book and returns its side, price and unfilled
     /// quantity.
     ///
     /// Returns `None` if `id` isn't resting: it never existed, was already cancelled, or was

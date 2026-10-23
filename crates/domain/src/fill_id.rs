@@ -1,3 +1,5 @@
+/// Identifies one fill. Fill ids are issued by the engine in order, one per fill, so
+/// settlement can recognize a fill it has already processed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct FillId(u64);
@@ -14,6 +16,7 @@ impl FillId {
     }
 }
 
+/// Issues fill ids in order, starting at 1 or after a checkpoint.
 #[derive(Debug)]
 pub struct FillIdGenerator {
     last_issued: FillId,
