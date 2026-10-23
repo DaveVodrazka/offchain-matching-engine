@@ -27,6 +27,11 @@ pub enum Event {
         side: Side,
         price: Price,
     },
+    Expired {
+        id: OrderId,
+        qty: Qty,
+        side: Side,
+    },
     Rejected {
         id: OrderId,
         reason: RejectionReason,

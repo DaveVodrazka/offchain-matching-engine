@@ -62,6 +62,13 @@ impl<T> Slab<T> {
         }
     }
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "general-purpose container API; the book grows the slab on demand"
+        )
+    )]
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Slab {
             vec: Vec::with_capacity(capacity),
@@ -149,14 +156,35 @@ impl<T> Slab<T> {
         Ok(item)
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "general-purpose container API; the book counts orders through its index"
+        )
+    )]
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "general-purpose container API; the book counts orders through its index"
+        )
+    )]
     pub(crate) fn len(&self) -> u32 {
         self.len
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "general-purpose container API; the book looks up keys through its index"
+        )
+    )]
     pub(crate) fn contains(&self, key: SlotKey) -> bool {
         let Some(slot) = self.vec.get(to_usize(key.index)) else {
             return false;

@@ -121,6 +121,13 @@ impl BookSide {
 
     /// Number of resting orders on this side, across all levels. O(L) in the number of levels.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used by invariant checks; callers count orders through the order index"
+        )
+    )]
     pub(crate) fn len(&self) -> u32 {
         let mut sum: u32 = 0;
         for level in self.levels.values() {
@@ -135,6 +142,13 @@ impl BookSide {
     /// Whether the side has no resting orders. O(1): the map never holds an empty level, so
     /// no levels means no orders.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used by invariant checks; callers count orders through the order index"
+        )
+    )]
     pub(crate) fn is_empty(&self) -> bool {
         self.levels.is_empty()
     }

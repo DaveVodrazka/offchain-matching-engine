@@ -27,6 +27,13 @@ pub(crate) struct FrontFill {
 }
 
 impl Node {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by invariant checks that resolve index entries to their nodes"
+        )
+    )]
     pub(crate) fn id(&self) -> OrderId {
         self.id
     }
@@ -99,6 +106,13 @@ impl Level {
     pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "aggregate level quantity for depth queries; kept in sync on every push and fill"
+        )
+    )]
     pub(crate) fn total_qty(&self) -> u128 {
         self.total_qty
     }

@@ -8,7 +8,11 @@ pub enum Command {
         side: Side,
         price: Price,
     },
-    Market,
+    Market {
+        id: OrderId,
+        qty: Qty,
+        side: Side,
+    },
     Cancel {
         id: OrderId,
     },

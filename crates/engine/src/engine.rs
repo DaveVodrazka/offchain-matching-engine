@@ -1,4 +1,4 @@
-use domain::{FillId, FillIdGenerator, OrderId, Price, Qty, Side};
+use domain::{FillIdGenerator, OrderId, Price, Qty, Side};
 
 use crate::{
     book::{
@@ -61,50 +61,69 @@ impl Engine {
         }
     }
 
+    /// Matches a taker against the opposite side, best price first, one maker per step,
+    /// until the taker is filled, the opposite side is empty, or the next price is beyond
+    /// `limit` (`None`: no limit).
+    ///
+    /// Returns one `Fill` per maker and the unfilled quantity (`None`: fully filled).
+    ///
     /// # Panics
     ///
-    /// Panics after `u64::MAX` fills
-    fn increment_fill_id(&mut self) -> FillId {
-        self.fill_id_generator.next_id()
-    }
-
-    fn limit(&mut self, id: OrderId, qty: Qty, side: Side, price: Price) -> Vec<Event> {
+    /// Panics after `u64::MAX` fills, when fill ids run out.
+    fn match_taker(
+        &mut self,
+        id: OrderId,
+        side: Side,
+        limit: Option<Price>,
+        qty: Qty,
+    ) -> (Vec<Event>, Option<Qty>) {
+        let opposite = side.opposite();
         let mut events = vec![];
-        let mut qty_left_option = Some(qty);
-        while let Some(qty_left) = qty_left_option {
-            let Some(best_price) = self.order_book.best_price(side.opposite()) else {
-                // other side is empty, we are done
-                break;
+        let mut qty_left = Some(qty);
+        while let Some(wanted) = qty_left {
+            let Some(best_price) = self.order_book.best_price(opposite) else {
+                break; // no liquidity
             };
-            if !price_crosses(side, price, best_price) {
-                // price is not good enough, we are done
-                break;
+            if limit.is_some_and(|limit| !price_crosses(side, limit, best_price)) {
+                break; // next price is beyond the limit
             }
             let Some(BestFill {
-                price: price_fill,
+                price,
                 maker,
                 filled,
                 remaining: _,
-            }) = self.order_book.fill_best(side.opposite(), qty_left)
+            }) = self.order_book.fill_best(opposite, wanted)
             else {
-                unreachable!("we checked that good price exists");
+                unreachable!("best_price returned Some, so the opposite side is not empty");
             };
-            let Ok(new_qty_left) = qty_left.checked_sub(filled) else {
-                unreachable!("fill_best fills at most qty_left");
+            let Ok(left) = wanted.checked_sub(filled) else {
+                unreachable!("fill_best fills at most `wanted`");
             };
-            qty_left_option = new_qty_left;
-            let fill_id = self.increment_fill_id();
+            qty_left = left;
             events.push(Event::Fill {
                 maker,
                 taker: id,
                 taker_side: side,
                 filled,
-                price: price_fill,
-                fill_id,
+                price,
+                fill_id: self.fill_id_generator.next_id(),
             });
         }
-        if let Some(qty_left) = qty_left_option {
-            events.push(self.rest(id, side, price, qty_left));
+        (events, qty_left)
+    }
+
+    fn limit(&mut self, id: OrderId, side: Side, price: Price, qty: Qty) -> Vec<Event> {
+        let (mut events, leftover) = self.match_taker(id, side, Some(price), qty);
+        if let Some(qty) = leftover {
+            events.push(self.rest(id, side, price, qty));
+        }
+        events
+    }
+
+    fn market(&mut self, id: OrderId, side: Side, qty: Qty) -> Vec<Event> {
+        let (mut events, leftover) = self.match_taker(id, side, None, qty);
+        if let Some(qty) = leftover {
+            events.push(Event::Expired { id, qty, side });
         }
         events
     }
@@ -118,14 +137,16 @@ impl Engine {
                 qty,
                 side,
                 price,
-            } => self.limit(id, qty, side, price),
-            Command::Market => todo!(),
+            } => self.limit(id, side, price, qty),
+            Command::Market { id, qty, side } => self.market(id, side, qty),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use domain::FillId;
+
     use super::*;
 
     fn order_id(n: u64) -> OrderId {
@@ -185,6 +206,14 @@ mod tests {
             price,
             side,
         }
+    }
+
+    fn market(id: OrderId, side: Side, qty: Qty) -> Command {
+        Command::Market { id, qty, side }
+    }
+
+    fn expired(id: OrderId, side: Side, qty: Qty) -> Event {
+        Event::Expired { id, qty, side }
     }
 
     fn unknown_order(id: OrderId) -> Event {
@@ -487,6 +516,147 @@ mod tests {
         );
     }
 
+    // --- Market ---
+
+    #[test]
+    fn market_on_empty_book_expires_in_full() {
+        let mut engine = Engine::new();
+        assert_eq!(
+            engine.apply(market(order_id(1), Side::Bid, qty(5))),
+            vec![expired(order_id(1), Side::Bid, qty(5))]
+        );
+    }
+
+    #[test]
+    fn market_sell_expires_when_only_asks_rest() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(5))]);
+        assert_eq!(
+            engine.apply(market(order_id(2), Side::Ask, qty(3))),
+            vec![expired(order_id(2), Side::Ask, qty(3))]
+        );
+        // The resting ask on the market order's own side is untouched.
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![cancelled(order_id(1), Side::Ask, price(100), qty(5))]
+        );
+    }
+
+    #[test]
+    fn market_buy_sweeps_asks_lowest_first_at_any_price() {
+        let mut engine = engine_with(&[
+            limit(order_id(1), Side::Ask, price(10_000), qty(1)),
+            limit(order_id(2), Side::Ask, price(100), qty(2)),
+            limit(order_id(3), Side::Ask, price(500), qty(3)),
+        ]);
+        assert_eq!(
+            engine.apply(market(order_id(4), Side::Bid, qty(6))),
+            vec![
+                fill(
+                    FillId::new(1),
+                    order_id(2),
+                    order_id(4),
+                    Side::Bid,
+                    price(100),
+                    qty(2)
+                ),
+                fill(
+                    FillId::new(2),
+                    order_id(3),
+                    order_id(4),
+                    Side::Bid,
+                    price(500),
+                    qty(3)
+                ),
+                fill(
+                    FillId::new(3),
+                    order_id(1),
+                    order_id(4),
+                    Side::Bid,
+                    price(10_000),
+                    qty(1)
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn market_sell_exhausts_bids_highest_first_and_expires_the_rest() {
+        let mut engine = engine_with(&[
+            limit(order_id(1), Side::Bid, price(99), qty(2)),
+            limit(order_id(2), Side::Bid, price(100), qty(3)),
+        ]);
+        assert_eq!(
+            engine.apply(market(order_id(3), Side::Ask, qty(8))),
+            vec![
+                fill(
+                    FillId::new(1),
+                    order_id(2),
+                    order_id(3),
+                    Side::Ask,
+                    price(100),
+                    qty(3)
+                ),
+                fill(
+                    FillId::new(2),
+                    order_id(1),
+                    order_id(3),
+                    Side::Ask,
+                    price(99),
+                    qty(2)
+                ),
+                expired(order_id(3), Side::Ask, qty(3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn market_partially_fills_a_maker_and_does_not_expire() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(10))]);
+        assert_eq!(
+            engine.apply(market(order_id(2), Side::Bid, qty(4))),
+            vec![fill(
+                FillId::new(1),
+                order_id(1),
+                order_id(2),
+                Side::Bid,
+                price(100),
+                qty(4)
+            )]
+        );
+        assert_eq!(
+            engine.apply(cancel(order_id(1))),
+            vec![cancelled(order_id(1), Side::Ask, price(100), qty(6))]
+        );
+    }
+
+    #[test]
+    fn expired_remainder_never_rests() {
+        let mut engine = engine_with(&[limit(order_id(1), Side::Ask, price(100), qty(2))]);
+        assert_eq!(
+            engine.apply(market(order_id(2), Side::Bid, qty(5))),
+            vec![
+                fill(
+                    FillId::new(1),
+                    order_id(1),
+                    order_id(2),
+                    Side::Bid,
+                    price(100),
+                    qty(2)
+                ),
+                expired(order_id(2), Side::Bid, qty(3)),
+            ]
+        );
+        assert_eq!(
+            engine.apply(cancel(order_id(2))),
+            vec![unknown_order(order_id(2))]
+        );
+        // No bid is left to match, so even the lowest ask rests.
+        assert_eq!(
+            engine.apply(limit(order_id(3), Side::Ask, price(1), qty(1))),
+            vec![rested(order_id(3), Side::Ask, price(1), qty(1))]
+        );
+    }
+
     // --- Cancel ---
 
     #[test]
@@ -569,6 +739,9 @@ mod tests {
             limit(order_id(5), Side::Ask, price(97), qty(8)),
             cancel(order_id(1)),
             cancel(order_id(42)),
+            limit(order_id(6), Side::Bid, price(95), qty(4)),
+            market(order_id(7), Side::Ask, qty(6)),
+            market(order_id(8), Side::Bid, qty(2)),
         ];
         let run = || {
             let mut engine = Engine::new();
